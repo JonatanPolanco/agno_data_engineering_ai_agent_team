@@ -15,3 +15,5 @@ Objetivo: Dar soporte senior a ingenieros de analítica y de datos mediante:
 
 El orquestador enruta cada tarea al agente adecuado, combina RAG especializado (libros y documentación oficial) 
 con un “Knowledge Hub” compartido y devuelve respuestas consolidadas.
+
+libros usados como base de conocimiento interna (RAG): https://github.com/JonatanPolanco/data_engineering__books
