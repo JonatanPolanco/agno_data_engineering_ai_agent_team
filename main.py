@@ -27,7 +27,6 @@ import os
 import typer
 from rich.console import Console
 from rich.panel import Panel
-from dotenv import load_dotenv
 import logging
 import sys
 from datetime import datetime
@@ -37,8 +36,6 @@ import uuid
 from src.core.team_builder import build_team, generate_session_id
 from src.storage.db_utils import list_user_sessions, clear_session_history
 
-# Configuración
-load_dotenv()
 console = Console()
 
 # Configurar logging
@@ -218,7 +215,7 @@ def cleanup_sessions(
 @app.command()
 def test_connection():
     """Prueba la conexión con los servicios de Google Cloud."""
-    from src.tools.vector_embedding import VertexSearchTool
+    from src.tools.embedding_search import VertexSearchToolClient
     from src.config import settings
     
     console.print(Panel(
@@ -235,7 +232,7 @@ def test_connection():
         
         # Test Vector Search
         console.print(f"\n[bold]🔍 Probando Vertex AI Search...[/bold]")
-        tool = VertexSearchTool(
+        tool = VertexSearchToolClient(
             project_id=settings.google_project_id,
             data_store_id=settings.data_store_id
         )

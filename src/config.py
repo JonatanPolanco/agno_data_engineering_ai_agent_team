@@ -14,6 +14,7 @@ class AppSettings(BaseSettings):
     google_project_id: str
     google_api_key: str
     data_store_id: str
+    google_location: str = "global"
     
     # Database
     db_file_path: str = "tmp/agents.db"
