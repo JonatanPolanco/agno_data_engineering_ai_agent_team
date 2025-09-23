@@ -15,10 +15,12 @@ class AppSettings(BaseSettings):
     google_api_key: str
     data_store_id: str
     google_location: str = "global"
+    data_store_id: str
     
     # Database
     db_file_path: str = "tmp/agents.db"
     db_table_prefix: str = "team"
+    lancedb_uri: str = "./lancedb"
     
     # Models
     default_llm_pro: str = "gemini-2.5-pro"

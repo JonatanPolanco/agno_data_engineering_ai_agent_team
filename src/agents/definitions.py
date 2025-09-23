@@ -1,116 +1,156 @@
+# src/agents/definitions.py
+
+
+import logging
+from typing import Optional, List, Dict, Any
+
+# --- Imports nativos y correctos de Agno 2.0 ---
 from agno.agent import Agent
+from google.cloud import discoveryengine_v1 as discoveryengine
+
 from agno.models.google import Gemini
 from agno.tools.duckduckgo import DuckDuckGoTools
-from agno.storage.sqlite import SqliteStorage
-from src.tools.vertex_knowledge import VertexKnowledge
 
-from src.tools.prompts import WEB_SEARCH, RAG, LEAD_PROMPT, CODE_STANDARDS_ENHANCED
 from src.config import settings
+from src.tools.prompts import (CODE_STANDARDS_ENHANCED, LEAD_PROMPT, RAG,
+                               WEB_SEARCH)
 
-import subprocess
+logger = logging.getLogger(__name__)
 
+# === ENVIRONMENT ===
+GOOGLE_API_KEY = settings.google_api_key
+DEFAULT_MODEL = settings.default_llm_flash
+DEFAULT_MODEL_PRO = settings.default_llm_pro
+
+
+if not GOOGLE_API_KEY:
+    raise RuntimeError("❌ GOOGLE_API_KEY no está definido en .env ni en el entorno.")
+
+# ==============================================================================
+#  LÓGICA DE CONSTRUCCIÓN Y CREACIÓN DE AGENTES (ESTILO AGNO 2.0)
+# ==============================================================================
+
+def vertex_ai_search_retriever(
+    query: str, agent: Optional[Agent] = None, num_documents: int = 5, **kwargs
+) -> Optional[List[Dict[str, Any]]]:
+    try:
+        client = discoveryengine.SearchServiceClient()
+        serving_config = client.serving_config_path(
+            project=settings.google_project_id,
+            location=settings.google_location,
+            data_store=settings.data_store_id,
+            serving_config="default_config",
+        )
+
+        request = discoveryengine.SearchRequest(
+            serving_config=serving_config,
+            query=query,
+            page_size=num_documents,
+            content_search_spec=discoveryengine.SearchRequest.ContentSearchSpec(
+                extractive_content_spec=discoveryengine.SearchRequest.ContentSearchSpec.ExtractiveContentSpec(
+                    max_extractive_answer_count=1
+                )
+            ),
+        )
+        response = client.search(request=request)
+
+        # Esto nos mostrará la estructura real de un resultado.
+        if response.results:
+            print("--- DEBUG: Estructura del primer resultado de Vertex AI ---")
+            print(response.results[0].document)
+            print("---------------------------------------------------------")
+        
+        retrieved_documents = []
+        for i, result in enumerate(response.results):
+            doc = result.document
+            
+            content_text = ""
+            if doc.derived_struct_data and 'extractive_answers' in doc.derived_struct_data and doc.derived_struct_data['extractive_answers']:
+                content_text = doc.derived_struct_data['extractive_answers'][0]['content']
+            elif doc.struct_data and 'content' in doc.struct_data:
+                content_text = doc.struct_data['content']
+
+            # Usamos `doc.name` o un placeholder si 'uri' no está en los metadatos.
+            # `doc.name` es un identificador único del recurso en Google Cloud.
+            source_uri = doc.struct_data.get("uri", doc.name) 
+            
+            payload = {
+                "title": doc.struct_data.get("title", ""),
+                "content": content_text,
+                "author": doc.struct_data.get("author", ""),
+                "uri": source_uri, # Usamos la variable corregida
+                "page": doc.struct_data.get("page", 0)
+            }
+            
+            score = 1.0 - (i * 0.1)
+            retrieved_documents.append({
+                "id": doc.id,
+                "score": score,
+                "payload": payload
+            })
+        
+        return retrieved_documents
+
+    except Exception as e:
+        print(f"Error durante la búsqueda en Vertex AI Search: {str(e)}")
+        return None
+    
 def build_context_block(user: str, session_id: str) -> str:
-    """Bloque de contexto estándar que se inyecta en todos los agentes."""
     return f"""
-    ## CONTEXTO DE SESIÓN
-    - 🆔 Session: {session_id}
-    - 👤 Usuario: {user}
-    - 🧠 Memoria: Resumen técnico relevante del historial (no todo crudo)
-    - 🤝 Coordinación: Considera análisis previo de RAG + Web Agents
+    - CONTEXTO DE SESIÓN -
+    - Session: {session_id}
+    - Usuario: {user}
     """
 
 
-agent_knowledge = VertexKnowledge(
-    project_id=settings.google_project_id,
-    data_store_id=settings.data_store_id,
-    location=settings.google_location,
-)
+# --- Las funciones de creación de agentes ahora son más simples y correctas ---
 
-
-# === AGENTES ===
-
-def create_web_agent(user: str, session_id: str, storage: SqliteStorage) -> Agent:
-    """Agente especializado en inteligencia externa (fuentes confiables web)."""
+def create_rag_agent(user: str, session_id: str) -> Optional[Agent]:
     return Agent(
-        name="Web Agent",
-        role="Agente de inteligencia externa especializado en documentación oficial y fuentes confiables.",
-        model=Gemini(id=settings.default_llm_pro, api_key=settings.google_api_key),
+        # Pasamos directamente la función que devuelve una lista de diccionarios.
+        knowledge_retriever=vertex_ai_search_retriever, 
+        search_knowledge=True,
+        instructions="Basado en el siguiente contexto extraído de la base de conocimiento, responde la pregunta del usuario.",
+        model=Gemini(id=settings.default_llm_flash, api_key=settings.google_api_key)
+    )
+
+def create_web_agent(user: str, session_id: str) -> Agent:
+    return Agent(
+        name="Web Agent", role="Agente externo en documentación oficial.",
+        model=Gemini(id=DEFAULT_MODEL, api_key=GOOGLE_API_KEY),
         tools=[DuckDuckGoTools()],
         instructions=WEB_SEARCH + build_context_block(user, session_id),
-        show_tool_calls=True,
-        markdown=True,
-        storage=storage,
-        user_id=user,
+        user_id=user, 
         session_id=session_id,
     )
 
-
-def create_rag_agent(user: str, session_id: str, storage: SqliteStorage) -> Agent:
-    """Agente de conocimiento interno con integración nativa a Vertex AI Search."""
+def create_lead_agent(user: str, session_id: str) -> Agent:
     return Agent(
-        name="RAG Agent",
-        role="Agente de conocimiento interno. Usa Vertex AI Search para consultas.",
-        model=Gemini(id=settings.default_llm_pro, api_key=settings.google_api_key),
-        knowledge=agent_knowledge,
-        search_knowledge=True,  
-        instructions=RAG + build_context_block(user, session_id),
-        show_tool_calls=True,
-        markdown=True,
-        storage=storage,
-        user_id=user,
-        session_id=session_id,
-    )
-
-
-def create_lead_agent(user: str, session_id: str, storage: SqliteStorage) -> Agent:
-    """Orquestador del sistema multi-agente."""
-    return Agent(
-        name="Lead Agent",
-        role=(
-            "Orquestador senior del sistema multi-agente. "
-            "Coordina a RAG Agent (conocimiento interno), Web Agent (fuentes externas) y Code Standards Agent (generación). "
-            "Tu misión es: consolidar hallazgos, detectar discrepancias, calcular un scorecard de confianza, "
-            "y generar SIEMPRE un Decision Memo válido antes de permitir cualquier acción de código."
-        ),
-        model=Gemini(id=settings.default_llm_pro, api_key=settings.google_api_key),
+        name="Lead Agent", role="Orquestador multi-agente.",
+        model=Gemini(id=DEFAULT_MODEL, api_key=GOOGLE_API_KEY),
         instructions=LEAD_PROMPT + build_context_block(user, session_id),
-        show_tool_calls=True,
-        markdown=True,
-        storage=storage,
-        user_id=user,
+        user_id=user, 
         session_id=session_id,
     )
 
-
-def create_code_standards_agent(user: str, session_id: str, storage: SqliteStorage) -> Agent:
-    """Agente enterprise de revisión y generación de código."""
+def create_code_standards_agent(user: str, session_id: str) -> Agent:
     return Agent(
-        name="Code Standards Agent",
-        role="Agente enterprise de revisión y generación de código. Solo produce artefactos si existe Decision Memo aprobado.",
-        model=Gemini(id=settings.default_llm_pro, api_key=settings.google_api_key),
+        name="Code Standards Agent", role="Agente de revisiÃ³n de cÃ³digo.",
+        model=Gemini(id=DEFAULT_MODEL, api_key=GOOGLE_API_KEY),
         instructions=CODE_STANDARDS_ENHANCED + build_context_block(user, session_id),
-        show_tool_calls=True,
-        markdown=True,
-        storage=storage,
         user_id=user,
         session_id=session_id,
     )
 
-
-# === FACTORY PRINCIPAL ===
-
-def get_all_agents(user: str, session_id: str):
-    """Retorna todos los agentes configurados para un usuario y sesión."""
-    table_name = f"agent_memory_{user}_{session_id}"
-
-    web_storage = SqliteStorage(table_name=table_name, db_file=settings.db_file_path)
-    rag_storage = SqliteStorage(table_name=table_name, db_file=settings.db_file_path)
-    lead_storage = SqliteStorage(table_name=table_name, db_file=settings.db_file_path)
-    code_storage = SqliteStorage(table_name=table_name, db_file=settings.db_file_path)
-
-    return (
-        create_web_agent(user, session_id, web_storage),
-        create_rag_agent(user, session_id, rag_storage),
-        create_lead_agent(user, session_id, lead_storage),
-        create_code_standards_agent(user, session_id, code_storage),
-    )
+def get_all_agents(user: str, session_id: str) -> Dict[str, Agent]:
+    agents = {
+        "Lead Agent": create_lead_agent(user, session_id),
+        "Web Agent": create_web_agent(user, session_id),
+        "Code Standards Agent": create_code_standards_agent(user, session_id)
+    }
+    rag_agent = create_rag_agent(user, session_id)
+    if rag_agent:
+        agents["RAG Agent"] = rag_agent
+    else:
+        logger.error("No se pudo inicializar el RAG Agent. El equipo funcionará sin conocimiento interno.")
+    return agents

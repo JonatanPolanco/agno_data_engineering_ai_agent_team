@@ -1,115 +1,99 @@
 import sqlite3
 from rich.console import Console
+from rich.table import Table
 import logging
+from datetime import datetime, timedelta
 
-# Configurar logging
+from src.config import settings
+
 logger = logging.getLogger(__name__)
 
+### CAMBIO: Toda la lógica ha sido reescrita para ser segura y operar en tablas fijas.
 
-def create_user_session_table(user: str, session_id: str):
-    """Crea la tabla de sesión para un usuario si no existe."""
-    from src.config import settings
-
-    table_name = f"{settings.db_table_prefix}_{user}_{session_id}"
-
+def get_db_connection():
+    """Establece una conexión con la base de datos SQLite."""
     try:
         conn = sqlite3.connect(settings.db_file_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+    except Exception as e:
+        logger.error(f"Error conectando a la base de datos en '{settings.db_file_path}': {e}", exc_info=True)
+        return None
+
+def clear_session_history(user: str, session_id: str) -> bool:
+    """Limpia el historial de una sesión específica de forma segura."""
+    tables_to_clear = ["agent_memory", "team_memory"]
+    
+    try:
+        conn = get_db_connection()
+        if not conn: 
+            return False
         cursor = conn.cursor()
-
-        cursor.execute(f"""
-        CREATE TABLE IF NOT EXISTS {table_name} (
-            session_id TEXT PRIMARY KEY,
-            user_id TEXT,
-            memory TEXT,
-            session_data TEXT,
-            extra_data TEXT,
-            created_at INTEGER,
-            updated_at INTEGER,
-            team_session_id TEXT,
-            team_id TEXT,
-            team_data TEXT
-        )
-        """)
-
+        
+        for table in tables_to_clear:
+            logger.info(f"Limpiando tabla '{table}' para sesión '{session_id}'...")
+            cursor.execute(
+                f"DELETE FROM {table} WHERE user_id = ? AND session_id = ?",
+                (user, session_id)
+            )
+        
         conn.commit()
         conn.close()
         return True
-
-    except Exception as e:
-        logger.error(f"Error creating session table '{table_name}': {e}")
-        return False
-
-
-def clear_session_history(user: str, session_id: str):
-    """Limpia el historial de una sesión específica."""
-    from src.config import settings
-
-    table_name = f"{settings.db_table_prefix}_{user}_{session_id}"
-    try:
-        conn = sqlite3.connect(settings.db_file_path)
-        cursor = conn.cursor()
-
-        cursor.execute(f"DELETE FROM {table_name} WHERE 1=1")
-
-        conn.commit()
-        conn.close()
+    except sqlite3.OperationalError:
+        logger.warning("Una de las tablas de memoria no existe (esto puede ser normal).")
         return True
-
     except Exception as e:
-        logger.error(f"Error clearing session history: {e}")
+        logger.error(f"Error clearing session history for '{session_id}': {e}", exc_info=True)
         return False
 
 
-def list_user_sessions(user: str, console: Console):
-    """Lista las sesiones existentes para un usuario."""
-    from src.config import settings
-
+def list_user_sessions(user: str, console: Console, detailed: bool = False):
+    """Lista las sesiones existentes para un usuario de forma segura."""
     try:
-        conn = sqlite3.connect(settings.db_file_path)
-        cursor = conn.cursor()
+        conn = get_db_connection()
+        if not conn:
+            console.print(f"[red]No se pudo conectar a la base de datos.[/red]")
+            return
 
+        cursor = conn.cursor()
         cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?",
-            (f"{settings.db_table_prefix}_{user}_%",)
+            """
+            SELECT session_id, COUNT(*) as message_count, MAX(created_at) as last_activity
+            FROM team_memory
+            WHERE user_id = ?
+            GROUP BY session_id
+            ORDER BY last_activity DESC
+            """,
+            (user,)
         )
         sessions = cursor.fetchall()
-
-        if sessions:
-            console.print(f"[green]Sesiones encontradas para usuario '{user}':[/green]")
-            for session in sessions:
-                session_name = session[0].replace(f"{settings.db_table_prefix}_{user}_", "")
-                console.print(f"  • {session_name}")
-        else:
-            console.print(f"[yellow]No se encontraron sesiones para usuario '{user}'[/yellow]")
-
         conn.close()
 
+        if sessions:
+            table = Table(title=f"Sesiones para el usuario [cyan]{user}[/cyan]")
+            table.add_column("Session ID", style="yellow")
+            table.add_column("Mensajes", justify="right", style="magenta")
+            table.add_column("Última Actividad", style="green")
+
+            for session in sessions:
+                if session["last_activity"]:
+                    last_activity_str = datetime.fromtimestamp(session['last_activity']).strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    last_activity_str = "N/A"
+                table.add_row(session['session_id'], str(session['message_count']), last_activity_str)
+            
+            console.print(table)
+        else:
+            console.print(f"[yellow]No se encontraron sesiones para el usuario '{user}'.[/yellow]")
+
+    except sqlite3.OperationalError:
+        console.print(f"[yellow]No hay historial de sesiones todavía. Inicia un chat para crear uno.[/yellow]")
     except Exception as e:
         console.print(f"[red]Error al listar sesiones: {e}[/red]")
 
 
-def check_session_table_columns(user: str, session_id: str, console: Console):
-    """Muestra las columnas de la tabla de sesión y verifica si coinciden con la estructura esperada."""
-    from src.config import settings
-
-    table_name = f"{settings.db_table_prefix}_{user}_{session_id}"
-    try:
-        conn = sqlite3.connect(settings.db_file_path)
-        cursor = conn.cursor()
-
-        cursor.execute(f"PRAGMA table_info({table_name});")
-        columns = cursor.fetchall()
-
-        if columns:
-            console.print(f"[green]Columnas de {table_name}:[/green]")
-            for col in columns:
-                console.print(f"  • {col[1]} ({col[2]})")
-        else:
-            console.print(f"[yellow]La tabla {table_name} no existe o está vacía[/yellow]")
-
-        conn.close()
-        return columns
-
-    except Exception as e:
-        console.print(f"[red]Error al consultar columnas de la tabla: {e}[/red]")
-        return []
+def cleanup_old_sessions(user: str, older_than_days: int, console: Console) -> int:
+    """Limpia sesiones antiguas para un usuario de forma segura."""
+    console.print("[yellow]La función de limpieza automática aún no está implementada en el nuevo esquema seguro.[/yellow]")
+    return 0
