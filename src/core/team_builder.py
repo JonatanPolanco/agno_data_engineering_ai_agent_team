@@ -1,7 +1,7 @@
 
 from agno.team.team import Team
 from agno.models.google import Gemini
-from src.agents.definitions import get_all_agents
+from src.agents.definitions import get_all_agents, memory_db
 from src.tools.prompts import LEAD_PROMPT
 from src.config import settings
 from datetime import datetime
@@ -29,8 +29,8 @@ def build_team(user: str, session_id: str) -> Team:
         logger.error(f"No se pudieron crear los agentes para la sesión {session_id}.")
         return None
     
-    # --- ✅ CORRECCIÓN: Accedemos a los agentes por su clave en el diccionario ---
-    # No desempaquetamos. Extraemos cada agente explícitamente.
+
+  #Extraemos cada agente explícitamente.
     lead_agent = agents_dict.get("Lead Agent")
     web_agent = agents_dict.get("Web Agent")
     rag_agent = agents_dict.get("RAG Agent")
@@ -59,6 +59,9 @@ def build_team(user: str, session_id: str) -> Team:
         model=Gemini(id=settings.default_llm_pro, api_key=settings.google_api_key),
         user_id=user,
         session_id=session_id,
+        db=memory_db, # La misma instancia compartida que los agentes
+        add_history_to_context=True,
         instructions=team_instructions,
-        markdown=True
+        markdown=True,
+        show_members_responses=True,
     )
