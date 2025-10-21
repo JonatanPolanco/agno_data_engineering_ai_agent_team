@@ -1,3 +1,5 @@
+# Resumen del proyecto
+
 Este proyecto implementa un orquestador y un conjunto de agentes especializados 
 (Arquitectura, ETL/ELT, Analítica & SQL, DataOps/QA, Estratégico y Search (web & documents)),
 apoyados por modelos Gemini (2.5 Pro y 2.0 Flash) y RAG en Vertex AI.
@@ -17,3 +19,12 @@ El orquestador enruta cada tarea al agente adecuado, combina RAG especializado (
 con un “Knowledge Hub” compartido y devuelve respuestas consolidadas.
 
 libros usados como base de conocimiento interna (RAG): https://github.com/JonatanPolanco/data_engineering__books
+
+## Interfaz consola:
+
+![alt text](image.png)
+
+
+
+## Interfaz Streamlit:
+![alt text](image-1.png)
